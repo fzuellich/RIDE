@@ -15,6 +15,8 @@
 import os
 import shutil
 import tempfile
+import watchdog.events
+import watchdog.observers
 
 from robotide.context import LOG
 from robotide.controller.commands import NullObserver, SaveFile
@@ -30,9 +32,11 @@ from robotide.spec.xmlreaders import SpecInitializer
 from robotide.utils import overrides
 
 
-class Project(_BaseController, WithNamespace):
+class Project(_BaseController, WithNamespace, watchdog.events.FileSystemEventHandler):
 
     def __init__(self, namespace=None, settings=None, library_manager=None):
+        #super(Project, self).__init__(patterns=['.txt', '.robot'], ignore_patterns=None,
+        #                              ignore_directories=None, case_sensitive=False)
         self._library_manager = self._construct_library_manager(library_manager, settings)
         if not self._library_manager.is_alive():
             self._library_manager.start()
@@ -45,10 +49,22 @@ class Project(_BaseController, WithNamespace):
         self._resource_file_controller_factory = ResourceFileControllerFactory(namespace, self)
         self._serializer = Serializer(settings, LOG)
 
+        observe_directory = self.default_dir
+        if observe_directory is not None:
+            self._file_observer = watchdog.observers.Observer()
+            self._file_observer.schedule(self, observe_directory, recursive=True)
+            self._file_observer.start()
+
     def _construct_library_manager(self, library_manager, settings):
         return library_manager or \
             LibraryManager(DATABASE_FILE,
                 SpecInitializer(settings.get('library xml directories', [])[:]))
+
+    def on_modified(self, event):
+
+        if event.is_directory:  # somehow calling the same object twice works?!
+            self._controller.reload()
+            self.data.reload()
 
     def __del__(self):
         if self._library_manager:
@@ -57,6 +73,8 @@ class Project(_BaseController, WithNamespace):
     def close(self):
         self._library_manager.stop()
         self._library_manager = None
+        self._file_observer.stop()
+        self._file_observer.join()
 
     @overrides(WithNamespace)
     def _set_namespace(self, namespace):
@@ -74,6 +92,10 @@ class Project(_BaseController, WithNamespace):
     def update_default_dir(self, path):
         default_dir = path if os.path.isdir(path) else os.path.dirname(path)
         self._settings.set('default directory', default_dir)
+
+        # reconfigure the file watcher when the default dir changes
+        self._file_observer.unschedule_all()
+        self._file_observer.schedule(self, default_dir, recursive=True)
 
     # TODO: in all other controllers data returns a robot data model object.
     @property
